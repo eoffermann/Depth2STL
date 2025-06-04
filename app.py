@@ -6,9 +6,13 @@ import os
 import tempfile
 import gradio as gr
 
-
 def load_image(path: str, invert: bool = False) -> np.ndarray:
-    """Load an image and convert it to a grayscale numpy array.
+    """Load an 8-bit, 16-bit grayscale, or disguised grayscale image and convert to a normalized array.
+
+    Supports:
+    - 8-bit grayscale (mode "L")
+    - 16-bit grayscale (mode "I;16")
+    - 16-bit grayscale embedded in RGB (equal R=G=B)
 
     Args:
         path (str): Path to the image file.
@@ -17,8 +21,30 @@ def load_image(path: str, invert: bool = False) -> np.ndarray:
     Returns:
         np.ndarray: 2D array of grayscale values normalized to [0, 1].
     """
-    img = Image.open(path).convert("L")
-    arr = np.array(img, dtype=np.float32) / 255.0
+    print(f"### Opening image at {path}")
+    img = Image.open(path)
+    print(f"### Detected image mode: {img.mode}")
+    if img.mode == "I;16":
+        arr = np.array(img, dtype=np.uint16).astype(np.float32) / 65535.0
+
+    elif img.mode in ("RGB", "RGBA"):
+        arr = np.array(img)
+        if np.all(arr[..., 0] == arr[..., 1]) and np.all(arr[..., 1] == arr[..., 2]):
+            # Collapse to single channel and check dtype
+            channel = arr[..., 0]
+            if channel.dtype == np.uint16:
+                print("### Channel dtype is uint16")
+                arr = channel.astype(np.float32) / 65535.0
+            else:
+                print(f"### Channel dtype: {channel.dtype}")
+                arr = channel.astype(np.float32) / 255.0
+        else:
+            raise ValueError("RGB image is not grayscale-like. Use a proper grayscale depth map.")
+
+    else:
+        img = img.convert("L")
+        arr = np.array(img, dtype=np.float32) / 255.0
+
     return 1.0 - arr if invert else arr
 
 def generate_mesh(
@@ -145,15 +171,19 @@ def launch_gui():
     """Launch the Gradio GUI for interactive STL generation."""
     def process_gui(image, width, depth, min_depth, step, invert):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-            image.save(tmp.name)
-            img_array = load_image(tmp.name, invert=invert)
+            arr = image.astype(np.float32)
+            if arr.dtype == np.uint16:
+                arr /= 65535.0
+            else:
+                arr /= 255.0
+            img_array = 1.0 - arr if invert else arr
         mesh = generate_mesh(img_array, width, depth, min_depth, step)
         tmp_stl = tempfile.NamedTemporaryFile(delete=False, suffix=".stl")
         save_mesh(mesh, tmp_stl.name)
         return tmp_stl.name
 
     inputs = [
-        gr.Image(type="pil", label="Grayscale Depth Map (PNG/JPG)"),
+        gr.Image(type="numpy", image_mode='L', label="Grayscale Depth Map (PNG/JPG)"),
         gr.Number(label="Width (cm)", value=10.0),
         gr.Number(label="Max Depth (cm)", value=1.0),
         gr.Number(label="Min Depth (cm)", value=0.1),
